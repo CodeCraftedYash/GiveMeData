@@ -43,5 +43,61 @@ assert.deepEqual(result, {
     missing: null,
 });
 
+const cardHtml = `
+    <div class="cardContent">
+        <h2 class="resultTitle">
+            <a href="/business-1">Business One</a>
+        </h2>
+        <a href="tel:123456">123456</a>
+    </div>
+
+    <div class="cardContent">
+        <h2 class="resultTitle">
+            <a href="/business-2">Business Two</a>
+        </h2>
+    </div>
+`;
+
+const $cards = cheerio.load(cardHtml);
+
+const cardResult = extractData(
+    $cards,
+    {
+        name: {
+            selector: '.resultTitle a',
+            type: 'text',
+            multiple: false,
+        },
+        listingUrl: {
+            selector: '.resultTitle a',
+            type: 'attribute',
+            attribute: 'href',
+            multiple: false,
+        },
+        phone: {
+            selector: 'a[href^="tel:"]',
+            type: 'text',
+            multiple: false,
+        },
+    },
+    '.cardContent'
+);
+
+assert.deepEqual(cardResult, [
+    {
+        name: 'Business One',
+        listingUrl: '/business-1',
+        phone: '123456',
+    },
+    {
+        name: 'Business Two',
+        listingUrl: '/business-2',
+        phone: null,
+    },
+]);
+
+console.log('Card extraction test passed.');
+console.log(cardResult);
+
 console.log('All extractor tests passed.');
 console.log(result);
