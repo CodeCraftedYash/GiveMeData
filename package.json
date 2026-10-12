@@ -1,0 +1,16 @@
+{
+  "name": "advancecrawler",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "mkdir crawlee-crawler\r cd crawlee-crawler\r npm init -y\r npm install crawlee",
+  "main": "index.js",
+  "scripts": {
+    "start": "node src/main.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "crawlee": "^3.18.2"
+  }
+}

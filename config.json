@@ -1,0 +1,15 @@
+{
+  "selectors": {
+    "title": {
+      "selector": "h1",
+      "type": "text",
+      "multiple": false
+    },
+    "links": {
+      "selector": "a",
+      "type": "attribute",
+      "attribute": "href",
+      "multiple": true
+    }
+  }
+}

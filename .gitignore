@@ -1,0 +1,5 @@
+# Dependencies
+node_modules/
+
+# Crawlee storage (request queues, datasets, key-value stores)
+storage/
