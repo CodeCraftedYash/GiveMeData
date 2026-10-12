@@ -1,24 +1,65 @@
+
+import { readFile, writeFile } from 'node:fs/promises';
 import { CheerioCrawler, Dataset } from 'crawlee';
 
-// CheerioCrawler crawls the web using HTTP requests
-// and parses HTML using the Cheerio library.
+import { extractData } from './extractor.js';
+import { validateConfig } from './validate.config.js';
+
+const configPath = new URL('../config.json', import.meta.url);
+
+const config = JSON.parse(
+    await readFile(configPath, 'utf8')
+);
+
+// Validate configuration before starting the crawl.
+validateConfig(config.selectors);
+
+if (
+    !Array.isArray(config.startUrls) ||
+    config.startUrls.length === 0
+) {
+    throw new Error('config.json must contain at least one start URL.');
+}
+
 const crawler = new CheerioCrawler({
-    // Use the requestHandler to process each of the crawled pages.
-    async requestHandler({ request, $, enqueueLinks, log }) {
-        const title = $('title').text();
-        log.info(`Title of ${request.loadedUrl} is '${title}'`);
+    maxRequestsPerCrawl: config.startUrls.length,
+    maxConcurrency: 3,
 
-        // Save results as JSON to ./storage/datasets/default
-        await Dataset.pushData({ title, url: request.loadedUrl });
+    async requestHandler({ request, $, log }) {
+        const result = {
+            url: request.loadedUrl,
+            records: extractData(
+                $,
+                config.selectors,
+                config.itemSelector
+            ),
+        };
 
-        // Extract links from the current page
-        // and add them to the crawling queue.
-        await enqueueLinks();
+        await Dataset.pushData(result);
+
+        console.log('\nExtracted data:');
+        console.log(JSON.stringify(result, null, 2));
+
+        log.info(`Successfully processed ${request.loadedUrl}`);
     },
 
-    // Let's limit our crawls to make our tests shorter and safer.
-    maxRequestsPerCrawl: 50,
+    async failedRequestHandler({ request, log }) {
+        log.error(`Failed to process ${request.url}`);
+    },
 });
 
-// Add first URL to the queue and start the crawl.
-await crawler.run(['https://crawlee.dev']);
+await crawler.run(config.startUrls);
+
+
+const dataset = await Dataset.open();
+const records = await dataset.export();
+
+const outputPath = new URL('../results.json', import.meta.url);
+
+await writeFile(
+    outputPath,
+    JSON.stringify(records, null, 2),
+    'utf8'
+)
+
+console.log(`\nExported ${records.length} records to results.json`)
