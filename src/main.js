@@ -1,6 +1,6 @@
 
-import { readFile, writeFile } from 'node:fs/promises';
-import { CheerioCrawler, Dataset } from 'crawlee';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { CheerioCrawler, Dataset, RequestQueue } from 'crawlee';
 
 import { extractData } from './extractor.js';
 import { validateConfig } from './validate.config.js';
@@ -11,34 +11,68 @@ const config = JSON.parse(
     await readFile(configPath, 'utf8')
 );
 
-// Validate configuration before starting the crawl.
 validateConfig(config.selectors);
 
-if (
-    !Array.isArray(config.startUrls) ||
-    config.startUrls.length === 0
-) {
+if (!Array.isArray(config.startUrls) || config.startUrls.length === 0) {
     throw new Error('config.json must contain at least one start URL.');
 }
 
+if (!config.paginationSelector) {
+    throw new Error('config.json must contain paginationSelector.');
+}
+
+const requestQueue = await RequestQueue.open();
+
+await requestQueue.addRequests(
+    config.startUrls.map(url => ({ url }))
+);
+
+const allRecords = [];
+
 const crawler = new CheerioCrawler({
-    maxRequestsPerCrawl: config.startUrls.length,
+    requestQueue,
+    maxRequestsPerCrawl: config.maxPages ?? 5,
     maxConcurrency: 3,
 
     async requestHandler({ request, $, log }) {
-        const result = {
+        const records = extractData(
+            $,
+            config.selectors,
+            config.itemSelector
+        );
+
+        const pageRecords = Array.isArray(records)
+            ? records
+            : [records];
+
+        const currentRecords = pageRecords.map(record => ({
+            ...record,
+            sourceUrl: request.loadedUrl,
+        }));
+
+        allRecords.push(...currentRecords);
+
+        await Dataset.pushData({
             url: request.loadedUrl,
-            records: extractData(
-                $,
-                config.selectors,
-                config.itemSelector
-            ),
-        };
+            records: currentRecords,
+        });
 
-        await Dataset.pushData(result);
+        console.log(`Extracted ${currentRecords.length} records from ${request.loadedUrl}`);
 
-        console.log('\nExtracted data:');
-        console.log(JSON.stringify(result, null, 2));
+        const nextPageUrl = $(config.paginationSelector).attr('href');
+
+        if (nextPageUrl) {
+            const absoluteUrl = new URL(
+                nextPageUrl,
+                request.loadedUrl
+            ).href;
+
+            await requestQueue.addRequest({
+                url: absoluteUrl,
+            });
+
+            log.info(`Queued next page: ${absoluteUrl}`);
+        }
 
         log.info(`Successfully processed ${request.loadedUrl}`);
     },
@@ -48,18 +82,28 @@ const crawler = new CheerioCrawler({
     },
 });
 
-await crawler.run(config.startUrls);
+await crawler.run();
 
+// Generate a safe filename from the starting URL.
+const sourceUrl = new URL(config.startUrls[0]);
 
-const dataset = await Dataset.open();
-const records = await dataset.export();
+const fileName = (
+    `${sourceUrl.hostname}${sourceUrl.pathname}${sourceUrl.search}`
+)
+    .replace(/[^a-z0-9]+/gi, '-')
+    .replace(/^-|-$/g, '')
+    .toLowerCase() + '.json';
 
-const outputPath = new URL('../results.json', import.meta.url);
+const dataDirectory = new URL('../data/', import.meta.url);
+
+await mkdir(dataDirectory, { recursive: true });
+
+const outputPath = new URL(fileName, dataDirectory);
 
 await writeFile(
     outputPath,
-    JSON.stringify(records, null, 2),
+    JSON.stringify(allRecords, null, 2),
     'utf8'
-)
+);
 
-console.log(`\nExported ${records.length} records to results.json`)
+console.log(`Saved ${allRecords.length} records to data/${fileName}`);
