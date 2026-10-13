@@ -1,109 +1,122 @@
+import { CheerioCrawler, RequestQueue } from "crawlee";
 
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { CheerioCrawler, Dataset, RequestQueue } from 'crawlee';
+import { loadTasks, loadProfiles } from "./utils/config-loader.js";
+import { findProfile } from "./utils/profile-matcher.js";
+import { saveJson } from "./utils/output.js";
+import { extractData } from "./extractor.js";
 
-import { extractData } from './extractor.js';
-import { validateConfig } from './validate.config.js';
+// Select the tasks to run.
+const allTasks = await loadTasks(); // Task = what you want the crawler to do.
+const profiles = await loadProfiles(); // Profile = how the crawler extracts data from a particular type of page.
 
-const configPath = new URL('../config.json', import.meta.url);
+const taskId = process.argv[2];
 
-const config = JSON.parse(
-    await readFile(configPath, 'utf8')
-);
+const tasks = taskId ? allTasks.filter((task) => task.id === taskId) : allTasks;
 
-validateConfig(config.selectors);
-
-if (!Array.isArray(config.startUrls) || config.startUrls.length === 0) {
-    throw new Error('config.json must contain at least one start URL.');
+if (tasks.length === 0) {
+  throw new Error(`No task found with ID: ${taskId}`);
 }
 
-if (!config.paginationSelector) {
-    throw new Error('config.json must contain paginationSelector.');
-}
+console.log(`Selected ${tasks.length} task(s).`);
 
-const requestQueue = await RequestQueue.open();
+// Run one crawl task.
+async function runTask(task) {
+  console.log(`\nStarting task: ${task.id}`);
+  console.log(`Starting URL: ${task.url}`);
 
-await requestQueue.addRequests(
-    config.startUrls.map(url => ({ url }))
-);
+  // Validate that the starting URL has a matching profile.
+  const initialMatch = findProfile(task.url, profiles);
 
-const allRecords = [];
+  console.log(`Initial profile: ${initialMatch.file}`);
 
-const crawler = new CheerioCrawler({
+  const requestQueue = await RequestQueue.open(`${task.id}-${Date.now()}`);
+
+  await requestQueue.addRequest({ url: task.url });
+
+  const allRecords = [];
+
+  const crawler = new CheerioCrawler({
     requestQueue,
-    maxRequestsPerCrawl: config.maxPages ?? 5,
-    maxConcurrency: 3,
+    maxRequestsPerCrawl:
+      task.maxRequestsPerCrawl ?? initialMatch.profile.maxPages ?? 5,
+    maxConcurrency: task.maxConcurrency ?? 3,
 
     async requestHandler({ request, $, log }) {
-        const records = extractData(
-            $,
-            config.selectors,
-            config.itemSelector
-        );
+      const currentUrl = request.loadedUrl || request.url;
 
-        const pageRecords = Array.isArray(records)
-            ? records
-            : [records];
+      // Choose a profile for this specific page.
+      const { file, profile } = findProfile(currentUrl, profiles);
 
-        const currentRecords = pageRecords.map(record => ({
-            ...record,
-            sourceUrl: request.loadedUrl,
-        }));
+      log.info(`Using profile "${file}" for ${currentUrl}`);
 
-        allRecords.push(...currentRecords);
+      const records = extractData($, profile.selectors, profile.itemSelector);
 
-        await Dataset.pushData({
-            url: request.loadedUrl,
-            records: currentRecords,
-        });
+      const pageRecords = Array.isArray(records) ? records : [records];
 
-        console.log(`Extracted ${currentRecords.length} records from ${request.loadedUrl}`);
+      const currentRecords = pageRecords.map((record) => ({
+        ...record,
+        sourceUrl: currentUrl,
+      }));
 
-        const nextPageUrl = $(config.paginationSelector).attr('href');
+      allRecords.push(...currentRecords);
+
+      log.info(`Extracted ${currentRecords.length} records from ${currentUrl}`);
+
+      //follow nested link 
+      
+      if (profile.linkDiscovery?.follow) {
+        const field = profile.linkDiscovery.field;
+
+        for (const record of currentRecords) {
+          const discoveredUrl = record[field];
+
+          if (typeof discoveredUrl !== "string" || !discoveredUrl.trim()) {
+            continue;
+          }
+
+          const absoluteUrl = new URL(discoveredUrl, currentUrl).href;
+
+          await requestQueue.addRequest({
+            url: absoluteUrl,
+          });
+
+          log.info(`Queued discovered link: ${absoluteUrl}`);
+        }
+      }
+
+      // Follow pagination only when this profile defines it.
+      if (profile.paginationSelector) {
+        const nextPageUrl = $(profile.paginationSelector).attr("href");
 
         if (nextPageUrl) {
-            const absoluteUrl = new URL(
-                nextPageUrl,
-                request.loadedUrl
-            ).href;
+          const absoluteUrl = new URL(nextPageUrl, currentUrl).href;
 
-            await requestQueue.addRequest({
-                url: absoluteUrl,
-            });
+          await requestQueue.addRequest({
+            url: absoluteUrl,
+          });
 
-            log.info(`Queued next page: ${absoluteUrl}`);
+          log.info(`Queued next page: ${absoluteUrl}`);
         }
+      }
 
-        log.info(`Successfully processed ${request.loadedUrl}`);
+      log.info(`Processed ${currentUrl}`);
     },
 
     async failedRequestHandler({ request, log }) {
-        log.error(`Failed to process ${request.url}`);
+      log.error(`Failed to process ${request.url}`);
     },
-});
+  });
 
-await crawler.run();
+  await crawler.run();
 
-// Generate a safe filename from the starting URL.
-const sourceUrl = new URL(config.startUrls[0]);
+  await saveJson(allRecords, task.url);
 
-const fileName = (
-    `${sourceUrl.hostname}${sourceUrl.pathname}${sourceUrl.search}`
-)
-    .replace(/[^a-z0-9]+/gi, '-')
-    .replace(/^-|-$/g, '')
-    .toLowerCase() + '.json';
+  console.log(`Finished task "${task.id}" with ${allRecords.length} records.`);
+}
 
-const dataDirectory = new URL('../data/', import.meta.url);
+// Execute tasks sequentially.
+for (const task of tasks) {
+  await runTask(task);
+}
 
-await mkdir(dataDirectory, { recursive: true });
-
-const outputPath = new URL(fileName, dataDirectory);
-
-await writeFile(
-    outputPath,
-    JSON.stringify(allRecords, null, 2),
-    'utf8'
-);
-
-console.log(`Saved ${allRecords.length} records to data/${fileName}`);
+console.log("\nAll selected tasks finished.");
